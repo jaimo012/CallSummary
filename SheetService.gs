@@ -14,11 +14,12 @@ const SheetService = {
    */
   getExistingFilenames: function() {
     const sheet = this.getSheet();
+    
     // B열 전체를 읽되, 데이터가 있는 곳까지만 읽어서 성능 최적화
     // 함수가 들어있는 행 때문에 getLastRow가 깊을 수 있으므로 넉넉히 읽습니다.
     const lastRow = sheet.getLastRow(); 
     if (lastRow < 2) return [];
-    
+
     // FILENAME 컬럼에서 데이터 가져오기
     return sheet.getRange(2, COLUMNS.FILENAME + 1, lastRow - 1, 1).getValues().map(r => r[0]).filter(n => n);
   },
@@ -59,18 +60,19 @@ const SheetService = {
 
     // insertRowIndex 위치부터 A, B열(2개 열)에 덮어씁니다.
     sheet.getRange(insertRowIndex, 1, newRows.length, 2).setValues(newRows);
-    
     console.log(`${newRows.length}개의 신규 파일 추가 (Row: ${insertRowIndex}). 시트 함수 계산 대기 중(5초)...`);
     SpreadsheetApp.flush(); 
-    Utilities.sleep(5000);  
+    Utilities.sleep(5000);
   },
 
   /**
-   * 분석할 대상(파일명은 있고 주요내용은 비어있는 행)을 가져옵니다.
+   * 분석할 대상(파일명은 있고 주요내용은 비어있는 행)을 
+   * 통화일시 기준 '오름차순(가장 오래된 것부터)'으로 정렬하여 가져옵니다.
    */
   getPendingRows: function() {
     const sheet = this.getSheet();
-    const lastRow = sheet.getLastRow(); // 함수가 있는 곳까지 읽어도 상관없음 (필터링하므로)
+    const lastRow = sheet.getLastRow();
+    
     if (lastRow < 2) return [];
 
     // A열(0) ~ J열(9) 까지 총 10개 열 읽기
@@ -83,17 +85,30 @@ const SheetService = {
       const mainContent = row[COLUMNS.CONTENT];
       
       // 파일명은 존재하나, 분석 결과(CONTENT)가 비어있는 경우 대상 선정
-      // (함수만 있고 파일명이 없는 빈 행은 여기서 자동으로 걸러집니다)
       if (fileName && fileName !== "" && mainContent === "") {
+        
+        // 정렬을 위한 시간 데이터 추출 (안전장치: 통화일시가 없으면 생성일시 사용)
+        const rawCallDate = row[COLUMNS.CALL_DATE];
+        const rawCreateDate = row[COLUMNS.DATE];
+        const targetDateObj = rawCallDate ? new Date(rawCallDate) : new Date(rawCreateDate);
+        
+        // 날짜가 유효하지 않은 예외 상황 방어 (Invalid Date의 getTime()은 NaN 반환)
+        const sortTime = isNaN(targetDateObj.getTime()) ? 0 : targetDateObj.getTime();
+
         pendingRows.push({
-          rowIndex: index + 2, 
+          rowIndex: index + 2, // 정렬 후에도 원래의 시트 행 위치를 기억하기 위한 절대 좌표
           fileName: fileName,
           targetName: row[COLUMNS.TARGET_NAME], 
           phoneNumber: String(row[COLUMNS.PHONE]).trim(), 
-          callType: row[COLUMNS.TYPE] 
+          callType: row[COLUMNS.TYPE],
+          sortTime: sortTime // 정렬용 보조 데이터 추가
         });
       }
     });
+
+    // 수집된 대기열을 sortTime(통화일시) 기준으로 오름차순 정렬 (과거 -> 최신)
+    pendingRows.sort((a, b) => a.sortTime - b.sortTime);
+
     return pendingRows;
   },
 
@@ -109,7 +124,7 @@ const SheetService = {
 
     const data = sheet.getRange(2, 1, lastRow - 1, 10).getValues();
     const cleanNum = String(targetPhoneNumber).replace(/[-\s]/g, "");
-    
+
     const history = data.filter(row => {
       const p = String(row[COLUMNS.PHONE]).replace(/[-\s]/g, "");
       const content = String(row[COLUMNS.CONTENT]);
@@ -142,7 +157,7 @@ const SheetService = {
    */
   updateAnalysisResult: function(rowIndex, resultJson, originalRowData) {
     const sheet = this.getSheet();
-    
+
     if (resultJson === "분석제외") {
        sheet.getRange(rowIndex, COLUMNS.CONTENT + 1).setValue("분석제외 (모닝콜 등)");
        return;
@@ -162,6 +177,7 @@ const SheetService = {
       const combinedContent = `[목적: ${data.call_purpose || ""}]\n\n${data.main_content || ""}`;
       
       let scheduleStr = "";
+
       if (Array.isArray(data.schedule_discussion) && data.schedule_discussion.length > 0) {
         scheduleStr = data.schedule_discussion.map(s => `[${s.date}] ${s.location} - ${s.content}`).join("\n");
       } else if (typeof data.schedule_discussion === 'string') {
